@@ -23,4 +23,8 @@ Thumbs.db
 .vscode/
 .idea/
     
-    
+*.exe
+terraform.exe
+.terraform/
+*.tfstate
+*.tfstate.*    
