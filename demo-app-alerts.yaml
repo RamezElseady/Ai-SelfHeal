@@ -16,4 +16,4 @@ spec:
         severity: critical
       annotations:
         summary: "Demo App Deployment is down!"
-        description: "The available replicas for deployment/demo-app in default namespace has dropped to 0." 
+        description: "The available replicas for deployment/demo-app in default namespace has dropped to 0."
