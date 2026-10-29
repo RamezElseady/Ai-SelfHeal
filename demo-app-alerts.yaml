@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-app-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus-stack
+spec:
+  groups:
+  - name: demo-app.rules
+    rules:
+    - alert: DemoAppDeploymentDown
+      expr: kube_deployment_status_replicas_available{deployment="demo-app", namespace="default"} == 0
+      for: 10s
+      labels:
+        severity: critical
+      annotations:
+        summary: "Demo App Deployment is down!"
+        description: "The available replicas for deployment/demo-app in default namespace has dropped to 0."
