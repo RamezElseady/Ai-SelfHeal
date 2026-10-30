@@ -1,0 +1,19 @@
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ['alertname', 'namespace']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 12h
+      receiver: 'ai-self-healing-webhook'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'ai-self-healing-webhook'
+    receivers:
+    - name: 'ai-self-healing-webhook'
+      webhook_configs:
+      - url: 'http://localhost:5000/webhook'
+        send_resolved: true
