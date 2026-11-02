@@ -1,19 +1,22 @@
 alertmanager:
   config:
-    global:
-      resolve_timeout: 5m
+    resolve_timeout: 5m
     route:
       group_by: ['alertname', 'namespace']
       group_wait: 10s
       group_interval: 10s
       repeat_interval: 12h
-      receiver: 'ai-self-healing-webhook'
+      receiver: 'ai-devops-agent'
       routes:
       - match:
-          severity: critical
-        receiver: 'ai-self-healing-webhook'
+          alertname: 'ContainerOOMKilled'
+        receiver: 'ai-devops-agent'
+      - match:
+          severity: 'critical'
+        receiver: 'ai-devops-agent'
+
     receivers:
-    - name: 'ai-self-healing-webhook'
+    - name: 'ai-devops-agent'
       webhook_configs:
-      - url: 'http://localhost:5000/webhook'
-        send_resolved: true
+      - url: 'http://ai-devops-webhook-svc/webhook'
+        send_resolved: false
