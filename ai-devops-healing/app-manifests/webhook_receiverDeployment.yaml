@@ -16,7 +16,7 @@ spec:
       serviceAccountName: ai-devops-webhook-sa
       containers:
       - name: webhook
-        image: ai-devops-webhook:latest
+        image: webhook-image:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
