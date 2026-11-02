@@ -22,9 +22,9 @@ spec:
         - containerPort: 5000
         env:
         - name: GOOGLE_API_KEY
-          value: "مفتاحك_هنا"
+          value: "AQ.Ab8RN6Lryc6iGFXfTqaERYO9Q2peWRUe6b3nqVAb4HEiaDpJaQ"
         - name: SLACK_WEBHOOK_URL
-          value: "رابط_سلاك_هنا"
+          value: "https://hooks.slack.com/services/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"
         resources:
           limits:
             memory: "128Mi"
