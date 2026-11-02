@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-demo
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-demo
+  template:
+    metadata:
+      labels:
+        app: oom-demo
+    spec:
+      containers:
+      - name: web
+        image: python:3.11-slim
+        command: ["python", "-c", "import time; time.sleep(5); a = '0' * 1024 * 1024 * 50"]
+        resources:
+          limits:
+            memory: "20Mi"
+          requests:
+            memory: "10Mi"

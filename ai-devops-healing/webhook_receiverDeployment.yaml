@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-devops-webhook
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-devops-webhook
+  template:
+    metadata:
+      labels:
+        app: ai-devops-webhook
+    spec:
+      serviceAccountName: ai-devops-webhook-sa
+      containers:
+      - name: webhook
+        image: ai-devops-webhook:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+        env:
+        - name: GOOGLE_API_KEY
+          value: "مفتاحك_هنا"
+        - name: SLACK_WEBHOOK_URL
+          value: "رابط_سلاك_هنا"
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-devops-webhook-svc
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-devops-webhook
+  ports:
+  - port: 80
+    targetPort: 5000

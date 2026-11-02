@@ -1,0 +1,5 @@
+flask
+pydantic
+google-genai
+kubernetes
+requests
