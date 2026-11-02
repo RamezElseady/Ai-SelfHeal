@@ -16,7 +16,7 @@ spec:
       serviceAccountName: ai-devops-webhook-sa
       containers:
       - name: webhook
-        image: 885427126187.dkr.ecr.us-east-1.amazonaws.com/:ai-devops-webhook:latest
+        image: 885427126187.dkr.ecr.us-east-1.amazonaws.com/ai-devops-webhook:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
