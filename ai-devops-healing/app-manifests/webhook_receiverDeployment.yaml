@@ -16,7 +16,7 @@ spec:
       serviceAccountName: ai-devops-webhook-sa
       containers:
       - name: webhook
-        image: webhook-image:latest
+        image: 885427126187.dkr.ecr.us-east-1.amazonaws.com/webhook-image:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
@@ -42,3 +42,14 @@ spec:
   ports:
   - port: 80
     targetPort: 5000
+
+
+
+
+
+
+#aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
+
+#docker tag webhook-image:latest 885427126187.dkr.ecr.us-east-1.amazonaws.com/webhook-image:latest
+
+#docker push 885427126187.dkr.ecr.us-east-1.amazonaws.com/webhook-image:latest
