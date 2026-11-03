@@ -9,6 +9,15 @@ spec:
   groups:
   - name: demo-app.rules
     rules:
+    - alert: ContainerOOMKilled
+      expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Container {{ $labels.container }} in pod {{ $labels.pod }} was OOMKilled"
+        description: "The container exceeded its memory limit and was terminated."
+
     - alert: DemoAppDeploymentDown
       expr: kube_deployment_status_replicas_available{deployment="demo-app", namespace="default"} == 0
       for: 10s
