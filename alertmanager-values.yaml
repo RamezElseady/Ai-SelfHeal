@@ -9,14 +9,24 @@ alertmanager:
       repeat_interval: 12h
       receiver: 'ai-self-healing-webhook'
       routes:
+      # 1. مسار الثقب الأسود (يجب أن يكون في الأول ليصطاد التنبيهات المزعجة فوراً)
+      - match_re:
+          alertname: "Watchdog|InfoInhibitor|AlertmanagerFailedToSendAlerts"
+        receiver: 'blackhole'
+        
+      # 2. المسارات الأصلية الخاصة بك
       - match:
           alertname: 'ContainerOOMKilled'
-          receiver: 'ai-self-healing-webhook'
+        receiver: 'ai-self-healing-webhook'
       - match:
           severity: 'critical'
-          receiver: 'ai-self-healing-webhook'
+        receiver: 'ai-self-healing-webhook'
+        
     receivers:
     - name: 'ai-self-healing-webhook'
       webhook_configs:
       - url: 'http://ai-devops-webhook-svc.default.svc.cluster.local/webhook'
         send_resolved: true
+        
+    # 3. تعريف الثقب الأسود (لا يحتوي على أي إعدادات إرسال، فيتم إسقاط التنبيه)
+    - name: 'blackhole'

@@ -22,13 +22,29 @@ spec:
         - containerPort: 5000
         env:
         - name: GOOGLE_API_KEY
-          value: "AQ.Ab8RN6Lryc6iGFXfTqaERYO9Q2peWRUe6b3nqVAb4HEiaDpJaQ"
+          valueFrom:
+            secretKeyRef:
+              name: ai-bot-secrets
+              key: GOOGLE_API_KEY
         - name: SLACK_WEBHOOK_URL
-          value: "https://hooks.slack.com/services/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"
+          valueFrom:
+            secretKeyRef:
+              name: ai-bot-secrets
+              key: SLACK_WEBHOOK_URL
+        - name: MEM_INCREASE_FACTOR
+          value: "5.0"  
         resources:
           limits:
             memory: "128Mi"
             cpu: "100m"
+        volumeMounts:
+        - name: code-volume
+          mountPath: /app/app.py   # <-- تأكد من هذا المسار من نتيجة الخطوة 1
+          subPath: app.py
+      volumes:
+      - name: code-volume
+        configMap:
+          name: webhook-code-cm
 ---
 apiVersion: v1
 kind: Service
@@ -42,14 +58,3 @@ spec:
   ports:
   - port: 80
     targetPort: 5000
-
-
-
-
-
-
-#aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com
-
-#docker tag webhook-image:latest 885427126187.dkr.ecr.us-east-1.amazonaws.com/webhook-image:latest
-
-#docker push 885427126187.dkr.ecr.us-east-1.amazonaws.com/webhook-image:latest
