@@ -28,3 +28,16 @@ terraform.exe
 .terraform/
 *.tfstate
 *.tfstate.*    
+
+cat <<EOF >> .gitignore
+.aws/
+.cache/
+.kube/
+.ssh/
+aws/
+.bash_*
+.profile
+awscliv2.zip
+kubectl
+kubectl.sha256
+EOF
