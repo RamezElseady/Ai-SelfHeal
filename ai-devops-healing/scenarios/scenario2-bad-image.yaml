@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-bad-image
+  labels:
+    app: test-bad-image
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-bad-image
+  template:
+    metadata:
+      labels:
+        app: test-bad-image
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.999.999
