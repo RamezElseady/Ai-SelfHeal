@@ -36,9 +36,19 @@ MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.7"))          # أق�
 MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "5"))                  # سقف الـ scale up
 SCALE_STEP = int(os.environ.get("SCALE_STEP", "1"))                      # الزيادة في كل مرة
 MAX_MEMORY_MI = int(os.environ.get("MAX_MEMORY_MI", "1024"))             # سقف الذاكرة
-MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "1.5"))
+MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "2.0")) # ضاعفنا المعامل الافتراضي لـ 2.0
+MIN_MEMORY_STEP_MI = int(os.environ.get("MIN_MEMORY_STEP_MI", "32"))     # أقل زيادة في المرة الواحدة 32Mi
 ACTION_COOLDOWN_SECONDS = int(os.environ.get("ACTION_COOLDOWN_SECONDS", "300"))
+AI_CALL_COOLDOWN_SECONDS = int(os.environ.get("AI_CALL_COOLDOWN_SECONDS", "120")) # حماية التوكنز من التكرار
 MAX_ACTIONS_PER_HOUR = int(os.environ.get("MAX_ACTIONS_PER_HOUR", "6"))  # سقف عام لكل الـ cluster
+
+# التنبيهات الإدارية اللي لازم نتجاهلها فوراً عشان ما تحرقش Tokens
+IGNORED_ALERTS = {
+    "Watchdog",
+    "InfoInhibitor",
+    "AlertmanagerFailedToSendAlerts",
+    "AlertmanagerClusterFailedToSendAlerts",
+}
 
 MAX_CONTEXT_CHARS = 7000
 LOG_TAIL_LINES = 20
@@ -48,7 +58,6 @@ LOG_CHARS_PER_CONTAINER = 700
 # 2) Kubernetes + Gemini clients
 # ===========================================================================
 try:
-    # تحديد مسار ملف الـ kubeconfig صراحةً داخل حاوية الدوكر
     config.load_kube_config(config_file="/root/.kube/config")
 except Exception:
     try:
@@ -65,23 +74,25 @@ executor = ThreadPoolExecutor(max_workers=3)
 _state_lock = Lock()
 _last_action = {}
 _action_times = deque()
+_inflight_alerts = set()   # لمنع دخول أكثر من Thread لنفس المشكلة في نفس اللحظة
+_last_ai_call = {}         # لمنع استدعاء Gemini بشكل متكرر لنفس المشكلة
 
 
 # ===========================================================================
 # 3) شكل الرد من Gemini (حرية في التحليل، قائمة مقفولة في الـ action)
 # ===========================================================================
 class Diagnosis(BaseModel):
-    summary: str                    # ايه اللي بيحصل بالظبط (تحليل حر)
-    root_cause: str                 # السبب الجذري
-    evidence: List[str]             # أدلة من الـ context تدعم التشخيص
+    summary: str
+    root_cause: str
+    evidence: List[str]
     severity: Literal["low", "medium", "high", "critical"]
-    confidence: float               # 0.0 - 1.0
+    confidence: float
     is_false_positive: bool
     action: Literal["none", "notify_human", "restart", "scale_up", "increase_memory"]
     target_deployment: str
-    target_container: str           # للـ increase_memory (أو "" لو مش مطلوب)
-    reasoning: str                  # ليه اخترت الـ action ده
-    manual_steps: List[str]         # أي حلول تانية خارج الصلاحيات الآمنة (للإنسان)
+    target_container: str
+    reasoning: str
+    manual_steps: List[str]
 
 
 def safe_fallback(reason):
@@ -159,7 +170,6 @@ def build_cluster_context(namespace):
     except Exception as e:
         lines.append(f"Error collecting deployments/pods: {e}")
 
-    # Warning events (غالباً فيها السبب الحقيقي: FailedScheduling, BackOff, Unhealthy ...)
     try:
         events = [e for e in v1.list_namespaced_event(namespace=namespace).items if e.type == "Warning"]
         events.sort(key=lambda e: (e.last_timestamp or e.event_time or e.metadata.creation_timestamp))
@@ -307,7 +317,6 @@ def mem_to_mib(q):
 
 
 def find_oom_container(dep, namespace):
-    """نتأكد من الـ cluster نفسه إن فيه OOMKilled فعلاً، مش بس كلام الـ AI"""
     sel = _selector(dep)
     if not sel:
         return None
@@ -317,6 +326,25 @@ def find_oom_container(dep, namespace):
                 if st and st.terminated and st.terminated.reason == "OOMKilled":
                     return cs.name
     return None
+
+
+def acquire_ai_slot(dedup_key):
+    """يتأكد إن مفيش Thread تاني شغال على نفس التنبيه، وإننا مش في فترة Cooldown للـ AI"""
+    now = time.time()
+    with _state_lock:
+        if dedup_key in _inflight_alerts:
+            return False, f"already processing '{dedup_key}' in another thread"
+        elapsed = now - _last_ai_call.get(dedup_key, 0)
+        if elapsed < AI_CALL_COOLDOWN_SECONDS:
+            return False, f"AI cooldown active for '{dedup_key}' ({int(elapsed)}s < {AI_CALL_COOLDOWN_SECONDS}s)"
+        _inflight_alerts.add(dedup_key)
+        _last_ai_call[dedup_key] = now
+    return True, ""
+
+
+def release_ai_slot(dedup_key):
+    with _state_lock:
+        _inflight_alerts.discard(dedup_key)
 
 
 def reserve_action(key):
@@ -336,7 +364,6 @@ def reserve_action(key):
 
 
 def execute_with_policy(d: Diagnosis, namespace):
-    """بيرجع (status, detail). status: proposed | blocked | dry_run | executed | failed"""
     if d.is_false_positive or d.action in ("none", "notify_human"):
         return "proposed", "No automated action taken (analysis only / escalated to a human)."
 
@@ -386,7 +413,9 @@ def execute_with_policy(d: Diagnosis, namespace):
             return "blocked", f"Container '{container}' has no readable memory limit; refusing to guess."
         if current_mi >= MAX_MEMORY_MI:
             return "blocked", f"Memory limit already at/above cap ({current_mi:.0f}Mi >= {MAX_MEMORY_MI}Mi)."
-        new_mi = int(min(math.ceil(current_mi * MEM_INCREASE_FACTOR), MAX_MEMORY_MI))
+        # ضمان قفزة كافية (على الأقل +32Mi أو الضعف) لتفادي OOMKilled المتكرر في القيم الصغيرة
+        calculated_mi = max(math.ceil(current_mi * MEM_INCREASE_FACTOR), current_mi + MIN_MEMORY_STEP_MI, 64)
+        new_mi = int(min(calculated_mi, MAX_MEMORY_MI))
         description = f"raise memory limit of '{name}/{container}' from {current_mi:.0f}Mi to {new_mi}Mi (cap {MAX_MEMORY_MI}Mi)"
         body = {"spec": {"template": {"spec": {"containers": [
             {"name": container, "resources": {"limits": {"memory": f"{new_mi}Mi"}}}]}}}}
@@ -440,11 +469,11 @@ def send_slack_report(alert_name, namespace, d: Diagnosis, status, detail):
 
 
 # ===========================================================================
-# 8) الـ Workflow + الـ Webhook
+# 8) الـ Workflow + الـ Webhook (مع بوابة الحماية Pre-LLM Gatekeeper)
 # ===========================================================================
-def process_alert(alert_name, namespace, alert_labels):
+def process_alert(alert_name, namespace, alert_labels, dedup_key):
     try:
-        logging.info("1️⃣ Collecting cluster context...")
+        logging.info(f"1️⃣ Collecting cluster context for [{dedup_key}]...")
         context = build_cluster_context(namespace)
         logging.info(f"2️⃣ Context ready ({len(context)} chars). Asking Gemini for deep analysis...")
 
@@ -457,25 +486,46 @@ def process_alert(alert_name, namespace, alert_labels):
         send_slack_report(alert_name, namespace, diagnosis, status, detail)
     except Exception:
         logging.exception("process_alert crashed")
+    finally:
+        release_ai_slot(dedup_key)
 
 
 @app.route('/webhook', methods=['POST'])
 def receive_alert():
     data = request.get_json(silent=True) or {}
-    logging.info("🚨 Received Alert! Queuing autonomous workflow...")
     global_status = data.get('status', 'firing')
+    queued_count = 0
 
     for alert in data.get('alerts', []):
-        if (alert.get('status') or global_status) == "firing":
-            labels = alert.get('labels', {})
-            executor.submit(
-                process_alert,
-                labels.get('alertname', 'unknown'),
-                labels.get('namespace', 'default'),
-                labels,
-            )
+        if (alert.get('status') or global_status) != "firing":
+            continue
 
-    return jsonify({"status": "accepted", "message": "Alert queued for autonomous processing"}), 202
+        labels = alert.get('labels', {})
+        alert_name = labels.get('alertname', 'unknown')
+        namespace = labels.get('namespace', 'default')
+
+        # 1. تجاهل التنبيهات الإدارية والـ Heartbeat فوراً
+        if alert_name in IGNORED_ALERTS:
+            logging.info(f"⏭️ Ignoring noisy/system alert: {alert_name}")
+            continue
+
+        # 2. تجاهل الـ Namespaces غير المسموح بها قبل استهلاك أي Tokens
+        if namespace not in ALLOWED_NAMESPACES:
+            logging.info(f"⏭️ Skipping alert '{alert_name}' in non-allowed namespace '{namespace}'")
+            continue
+
+        # 3. منع التكرار والـ Race Condition قبل إرسال المهمة للـ ThreadPool
+        dedup_key = f"{namespace}/{alert_name}"
+        ok, reason = acquire_ai_slot(dedup_key)
+        if not ok:
+            logging.info(f"🛡️ Suppressed duplicate alert: {reason}")
+            continue
+
+        logging.info(f"🚨 Queuing autonomous workflow for [{dedup_key}]...")
+        queued_count += 1
+        executor.submit(process_alert, alert_name, namespace, labels, dedup_key)
+
+    return jsonify({"status": "accepted", "queued": queued_count}), 202
 
 
 if __name__ == '__main__':
