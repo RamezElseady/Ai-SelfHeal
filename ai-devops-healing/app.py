@@ -20,7 +20,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ===========================================================================
-# 1) الإعدادات (كلها قابلة للتعديل بـ env vars)
+# 1) Configuration (Configurable via env vars)
 # ===========================================================================
 GEMINI_MODELS = [
     m.strip()
@@ -29,20 +29,20 @@ GEMINI_MODELS = [
 ]
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
-# --- Safety policy: اللي الكود بيسمح بيه مهما قال الـ AI ---
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"          # true = يحلل ويقترح بس
+# --- Safety policy: Enforced rules regardless of AI decision ---
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"           # true = Analyze and propose only
 ALLOWED_NAMESPACES = {n.strip() for n in os.environ.get("ALLOWED_NAMESPACES", "default").split(",") if n.strip()}
-MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.7"))          # أقل ثقة للتنفيذ التلقائي
-MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "5"))                  # سقف الـ scale up
-SCALE_STEP = int(os.environ.get("SCALE_STEP", "2"))                      # تم التعديل لـ 2 للديمو عشان يقفز من 1 لـ 3
-MAX_MEMORY_MI = int(os.environ.get("MAX_MEMORY_MI", "1024"))             # سقف الذاكرة
-MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "2.0")) 
-MIN_MEMORY_STEP_MI = int(os.environ.get("MIN_MEMORY_STEP_MI", "32"))     
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.7"))          # Minimum confidence for auto-execution
+MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "5"))                  # Max replicas for scale up
+SCALE_STEP = int(os.environ.get("SCALE_STEP", "1"))                      # Increment step
+MAX_MEMORY_MI = int(os.environ.get("MAX_MEMORY_MI", "1024"))             # Max memory limit
+MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "2.0")) # Factor to increase memory
+MIN_MEMORY_STEP_MI = int(os.environ.get("MIN_MEMORY_STEP_MI", "32"))     # Minimum memory increase step
 ACTION_COOLDOWN_SECONDS = int(os.environ.get("ACTION_COOLDOWN_SECONDS", "300"))
-AI_CALL_COOLDOWN_SECONDS = int(os.environ.get("AI_CALL_COOLDOWN_SECONDS", "120")) 
-MAX_ACTIONS_PER_HOUR = int(os.environ.get("MAX_ACTIONS_PER_HOUR", "6"))  
+AI_CALL_COOLDOWN_SECONDS = int(os.environ.get("AI_CALL_COOLDOWN_SECONDS", "120")) # Token protection / Rate limiting
+MAX_ACTIONS_PER_HOUR = int(os.environ.get("MAX_ACTIONS_PER_HOUR", "6"))  # Global action cap per cluster
 
-# التنبيهات الإدارية اللي لازم نتجاهلها فوراً عشان ما تحرقش Tokens
+# Administrative alerts to ignore immediately to save Tokens
 IGNORED_ALERTS = {
     "Watchdog",
     "InfoInhibitor",
@@ -74,12 +74,12 @@ executor = ThreadPoolExecutor(max_workers=3)
 _state_lock = Lock()
 _last_action = {}
 _action_times = deque()
-_inflight_alerts = set()   
-_last_ai_call = {}         
+_inflight_alerts = set()   # Prevent multiple threads for the same issue
+_last_ai_call = {}         # Prevent duplicate Gemini calls for the same issue
 
 
 # ===========================================================================
-# 3) شكل الرد من Gemini
+# 3) Gemini Response Schema
 # ===========================================================================
 class Diagnosis(BaseModel):
     summary: str
@@ -106,7 +106,7 @@ def safe_fallback(reason):
 
 
 # ===========================================================================
-# 4) جمع السياق من الـ cluster
+# 4) Collect Cluster Context
 # ===========================================================================
 def _selector(dep):
     labels = (dep.spec.selector.match_labels or {}) if dep.spec.selector else {}
@@ -183,7 +183,7 @@ def build_cluster_context(namespace):
 
 
 # ===========================================================================
-# 5) Gemini: تحليل حر + Structured output + Fallback
+# 5) Gemini: Free analysis + Structured output + Model Fallback
 # ===========================================================================
 NON_TEXT_KEYWORDS = ("tts", "image", "audio", "live", "embed", "imagen", "veo",
                      "robotics", "computer", "native", "transcribe")
@@ -216,18 +216,22 @@ CLUSTER SNAPSHOT (collected just now):
 YOUR JOB
 1. Analyse deeply. Correlate deployment status, pod/container states, exit codes, restart counts,
    resource limits, warning events and logs. Explain what is really happening and why.
+   Cite concrete evidence from the snapshot. Think like an experienced engineer, not a pattern matcher.
 2. Decide whether the alert is real or a false positive.
-3. Pick exactly ONE automated action from this closed list:
-   - none            : nothing to do
-   - notify_human    : human intervention required
-   - restart         : rolling restart of a deployment
-   - scale_up        : add replicas (ONLY for capacity, high CPU usage, CPU throttling, or Stress load problems)
+3. Pick exactly ONE automated action from this closed list (the system will independently verify it):
+   - none            : nothing to do (e.g. false positive, or already healthy)
+   - notify_human    : the problem needs a human (code bug, bad config, bad image, external dependency...)
+   - restart         : rolling restart of a deployment (only sensible for a genuinely unhealthy deployment)
+   - scale_up        : add replicas (only for capacity / load problems)
    - increase_memory : raise a container memory limit (only for confirmed OOMKilled)
-4. Anything that needs other fixes goes in manual_steps.
+4. Anything that needs other fixes (config change, image rollback, code fix, etc.) goes in manual_steps.
+   You may recommend ANYTHING there, but you cannot execute it.
 
 RULES
-- target_deployment must be a deployment name from the snapshot.
+- target_deployment must be a deployment name that appears in the snapshot.
 - For increase_memory, set target_container to the container name; otherwise use an empty string.
+- Be honest about confidence (0.0-1.0). If the evidence is weak, lower it and prefer notify_human.
+- Your action must be consistent with your root_cause. If you believe it is a false positive, choose none.
 """
 
 
@@ -260,19 +264,28 @@ def ask_gemini(alert_name, alert_labels, context):
 
             except errors.ClientError as e:
                 if e.code == 404:
+                    logging.warning(f"Model '{model}' not found, next...")
                     break
                 if e.code == 429:
                     time.sleep(3 * (attempt + 1))
                     continue
                 if e.code == 400 and use_schema:
+                    logging.warning(f"'{model}' rejected schema, retrying without it")
                     use_schema = False
                     continue
+                logging.error(f"Client error {e.code} on '{model}': {e}")
                 break
+
             except errors.ServerError as e:
                 if e.code == 504:
+                    logging.warning(f"'{model}' timed out (504), skipping to next model")
                     break
-                time.sleep(2 * (attempt + 1))
-            except Exception:
+                wait = 2 * (attempt + 1)
+                logging.warning(f"'{model}' server error {e.code}, retry in {wait}s")
+                time.sleep(wait)
+
+            except Exception as e:
+                logging.warning(f"'{model}' attempt {attempt + 1} failed: {e}")
                 time.sleep(1)
 
         i += 1
@@ -280,15 +293,17 @@ def ask_gemini(alert_name, alert_labels, context):
             discovered = True
             extra = [m for m in list_flash_models() if m not in models][:6]
             if extra:
+                logging.info(f"Trying discovered models: {extra}")
                 models += extra
 
     return safe_fallback("Gemini unavailable or timed out on all models.")
 
 
 # ===========================================================================
-# 6) Policy engine: الكود هو الحَكَم
+# 6) Policy engine: Code is the judge, not the AI
 # ===========================================================================
 _MEM_UNITS = (("Ki", 1024), ("Mi", 1024 ** 2), ("Gi", 1024 ** 3), ("K", 1000), ("M", 1000 ** 2), ("G", 1000 ** 3))
+
 
 def mem_to_mib(q):
     try:
@@ -299,6 +314,7 @@ def mem_to_mib(q):
         return float(q) / (1024 ** 2)
     except Exception:
         return None
+
 
 def find_oom_container(dep, namespace):
     sel = _selector(dep)
@@ -311,7 +327,9 @@ def find_oom_container(dep, namespace):
                     return cs.name
     return None
 
+
 def acquire_ai_slot(dedup_key):
+    """Ensure no other thread is processing this alert and AI is not in cooldown."""
     now = time.time()
     with _state_lock:
         if dedup_key in _inflight_alerts:
@@ -323,11 +341,14 @@ def acquire_ai_slot(dedup_key):
         _last_ai_call[dedup_key] = now
     return True, ""
 
+
 def release_ai_slot(dedup_key):
     with _state_lock:
         _inflight_alerts.discard(dedup_key)
 
+
 def reserve_action(key):
+    """Deployment cooldown + global hourly action cap."""
     now = time.time()
     with _state_lock:
         elapsed = now - _last_action.get(key, 0)
@@ -340,6 +361,7 @@ def reserve_action(key):
         _last_action[key] = now
         _action_times.append(now)
     return True, ""
+
 
 def execute_with_policy(d: Diagnosis, namespace):
     if d.is_false_positive or d.action in ("none", "notify_human"):
@@ -370,7 +392,6 @@ def execute_with_policy(d: Diagnosis, namespace):
             "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).isoformat()}}}}}
         apply = lambda: apps_v1.patch_namespaced_deployment(name=name, namespace=namespace, body=body)
 
-    # --- التعديل الجوهري للـ Scale Up هنا ---
     elif d.action == "scale_up":
         if desired == 0:
             return "blocked", f"'{name}' is scaled to 0 (possibly intentional). Not scaling up."
@@ -378,9 +399,8 @@ def execute_with_policy(d: Diagnosis, namespace):
             return "blocked", f"'{name}' already at max replicas ({desired}/{MAX_REPLICAS})."
         new_replicas = min(desired + SCALE_STEP, MAX_REPLICAS)
         description = f"scale '{name}' from {desired} to {new_replicas} replicas (cap {MAX_REPLICAS})"
-        # استخدام patch_namespaced_deployment بدلاً من patch_namespaced_deployment_scale لضمان التوافقية
-        body = {"spec": {"replicas": new_replicas}}
-        apply = lambda: apps_v1.patch_namespaced_deployment(name=name, namespace=namespace, body=body)
+        apply = lambda: apps_v1.patch_namespaced_deployment_scale(
+            name=name, namespace=namespace, body={"spec": {"replicas": new_replicas}})
 
     elif d.action == "increase_memory":
         container = find_oom_container(dep, namespace)
@@ -393,6 +413,7 @@ def execute_with_policy(d: Diagnosis, namespace):
             return "blocked", f"Container '{container}' has no readable memory limit; refusing to guess."
         if current_mi >= MAX_MEMORY_MI:
             return "blocked", f"Memory limit already at/above cap ({current_mi:.0f}Mi >= {MAX_MEMORY_MI}Mi)."
+        # Ensure sufficient jump (at least +32Mi or double) to avoid repeated OOMKilled
         calculated_mi = max(math.ceil(current_mi * MEM_INCREASE_FACTOR), current_mi + MIN_MEMORY_STEP_MI, 64)
         new_mi = int(min(calculated_mi, MAX_MEMORY_MI))
         description = f"raise memory limit of '{name}/{container}' from {current_mi:.0f}Mi to {new_mi}Mi (cap {MAX_MEMORY_MI}Mi)"
@@ -423,6 +444,7 @@ def execute_with_policy(d: Diagnosis, namespace):
 STATUS_EMOJI = {"executed": "✅", "proposed": "💡", "blocked": "🛡️", "dry_run": "🧪", "failed": "❌"}
 SEVERITY_EMOJI = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
 
+
 def send_slack_report(alert_name, namespace, d: Diagnosis, status, detail):
     if not SLACK_WEBHOOK_URL:
         return
@@ -447,13 +469,13 @@ def send_slack_report(alert_name, namespace, d: Diagnosis, status, detail):
 
 
 # ===========================================================================
-# 8) الـ Workflow + الـ Webhook
+# 8) Workflow + Webhook (with Pre-LLM Gatekeeper)
 # ===========================================================================
 def process_alert(alert_name, namespace, alert_labels, dedup_key):
     try:
         logging.info(f"1️⃣ Collecting cluster context for [{dedup_key}]...")
         context = build_cluster_context(namespace)
-        logging.info(f"2️⃣ Context ready ({len(context)} chars). Asking Gemini...")
+        logging.info(f"2️⃣ Context ready ({len(context)} chars). Asking Gemini for deep analysis...")
 
         diagnosis = ask_gemini(alert_name, alert_labels, context)
         logging.info(f"3️⃣ Diagnosis: {json.dumps(diagnosis.model_dump(), ensure_ascii=False)}")
@@ -482,14 +504,17 @@ def receive_alert():
         alert_name = labels.get('alertname', 'unknown')
         namespace = labels.get('namespace', 'default')
 
+        # 1. Ignore administrative and heartbeat alerts immediately
         if alert_name in IGNORED_ALERTS:
             logging.info(f"⏭️ Ignoring noisy/system alert: {alert_name}")
             continue
 
+        # 2. Ignore unauthorized namespaces before consuming tokens
         if namespace not in ALLOWED_NAMESPACES:
             logging.info(f"⏭️ Skipping alert '{alert_name}' in non-allowed namespace '{namespace}'")
             continue
 
+        # 3. Prevent duplication and race conditions before queuing
         dedup_key = f"{namespace}/{alert_name}"
         ok, reason = acquire_ai_slot(dedup_key)
         if not ok:

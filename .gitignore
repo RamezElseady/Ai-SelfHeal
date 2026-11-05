@@ -9,7 +9,7 @@ override.tf.json
 *.tfstate.backup
 .terraform.lock.hcl
 
-# --- Python (للـ Operator مستقبلاً) ---
+# --- Python  Operator 
 __pycache__/
 *.py[cod]
 *$py.class
