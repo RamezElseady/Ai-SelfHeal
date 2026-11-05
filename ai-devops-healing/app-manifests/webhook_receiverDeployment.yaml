@@ -39,7 +39,7 @@ spec:
             cpu: "100m"
         volumeMounts:
         - name: code-volume
-          mountPath: /app/app.py   # <-- تأكد من هذا المسار من نتيجة الخطوة 1
+          mountPath: /app/app.py   
           subPath: app.py
       volumes:
       - name: code-volume

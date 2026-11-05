@@ -20,7 +20,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ===========================================================================
-# 1) الإعدادات (كلها قابلة للتعديل بـ env vars)
+# 1) Configuration (Configurable via env vars)
 # ===========================================================================
 GEMINI_MODELS = [
     m.strip()
@@ -29,20 +29,20 @@ GEMINI_MODELS = [
 ]
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
 
-# --- Safety policy: اللي الكود بيسمح بيه مهما قال الـ AI ---
-DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"          # true = يحلل ويقترح بس
+# --- Safety policy: Enforced rules regardless of AI decision ---
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"           # true = Analyze and propose only
 ALLOWED_NAMESPACES = {n.strip() for n in os.environ.get("ALLOWED_NAMESPACES", "default").split(",") if n.strip()}
-MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.7"))          # أقل ثقة للتنفيذ التلقائي
-MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "5"))                  # سقف الـ scale up
-SCALE_STEP = int(os.environ.get("SCALE_STEP", "1"))                      # الزيادة في كل مرة
-MAX_MEMORY_MI = int(os.environ.get("MAX_MEMORY_MI", "1024"))             # سقف الذاكرة
-MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "2.0")) # ضاعفنا المعامل الافتراضي لـ 2.0
-MIN_MEMORY_STEP_MI = int(os.environ.get("MIN_MEMORY_STEP_MI", "32"))     # أقل زيادة في المرة الواحدة 32Mi
+MIN_CONFIDENCE = float(os.environ.get("MIN_CONFIDENCE", "0.7"))          # Minimum confidence for auto-execution
+MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "5"))                  # Max replicas for scale up
+SCALE_STEP = int(os.environ.get("SCALE_STEP", "1"))                      # Increment step
+MAX_MEMORY_MI = int(os.environ.get("MAX_MEMORY_MI", "1024"))             # Max memory limit
+MEM_INCREASE_FACTOR = float(os.environ.get("MEM_INCREASE_FACTOR", "2.0")) # Factor to increase memory
+MIN_MEMORY_STEP_MI = int(os.environ.get("MIN_MEMORY_STEP_MI", "32"))     # Minimum memory increase step
 ACTION_COOLDOWN_SECONDS = int(os.environ.get("ACTION_COOLDOWN_SECONDS", "300"))
-AI_CALL_COOLDOWN_SECONDS = int(os.environ.get("AI_CALL_COOLDOWN_SECONDS", "120")) # حماية التوكنز من التكرار
-MAX_ACTIONS_PER_HOUR = int(os.environ.get("MAX_ACTIONS_PER_HOUR", "6"))  # سقف عام لكل الـ cluster
+AI_CALL_COOLDOWN_SECONDS = int(os.environ.get("AI_CALL_COOLDOWN_SECONDS", "120")) # Token protection / Rate limiting
+MAX_ACTIONS_PER_HOUR = int(os.environ.get("MAX_ACTIONS_PER_HOUR", "6"))  # Global action cap per cluster
 
-# التنبيهات الإدارية اللي لازم نتجاهلها فوراً عشان ما تحرقش Tokens
+# Administrative alerts to ignore immediately to save Tokens
 IGNORED_ALERTS = {
     "Watchdog",
     "InfoInhibitor",
@@ -74,12 +74,12 @@ executor = ThreadPoolExecutor(max_workers=3)
 _state_lock = Lock()
 _last_action = {}
 _action_times = deque()
-_inflight_alerts = set()   # لمنع دخول أكثر من Thread لنفس المشكلة في نفس اللحظة
-_last_ai_call = {}         # لمنع استدعاء Gemini بشكل متكرر لنفس المشكلة
+_inflight_alerts = set()   # Prevent multiple threads for the same issue
+_last_ai_call = {}         # Prevent duplicate Gemini calls for the same issue
 
 
 # ===========================================================================
-# 3) شكل الرد من Gemini (حرية في التحليل، قائمة مقفولة في الـ action)
+# 3) Gemini Response Schema
 # ===========================================================================
 class Diagnosis(BaseModel):
     summary: str
@@ -106,7 +106,7 @@ def safe_fallback(reason):
 
 
 # ===========================================================================
-# 4) جمع السياق من الـ cluster (كل اللي مهندس DevOps كان هيبصله)
+# 4) Collect Cluster Context
 # ===========================================================================
 def _selector(dep):
     labels = (dep.spec.selector.match_labels or {}) if dep.spec.selector else {}
@@ -183,7 +183,7 @@ def build_cluster_context(namespace):
 
 
 # ===========================================================================
-# 5) Gemini: تحليل حر + Structured output + Fallback بين الموديلات
+# 5) Gemini: Free analysis + Structured output + Model Fallback
 # ===========================================================================
 NON_TEXT_KEYWORDS = ("tts", "image", "audio", "live", "embed", "imagen", "veo",
                      "robotics", "computer", "native", "transcribe")
@@ -300,7 +300,7 @@ def ask_gemini(alert_name, alert_labels, context):
 
 
 # ===========================================================================
-# 6) Policy engine: الكود هو الحَكَم، مش الـ AI
+# 6) Policy engine: Code is the judge, not the AI
 # ===========================================================================
 _MEM_UNITS = (("Ki", 1024), ("Mi", 1024 ** 2), ("Gi", 1024 ** 3), ("K", 1000), ("M", 1000 ** 2), ("G", 1000 ** 3))
 
@@ -329,7 +329,7 @@ def find_oom_container(dep, namespace):
 
 
 def acquire_ai_slot(dedup_key):
-    """يتأكد إن مفيش Thread تاني شغال على نفس التنبيه، وإننا مش في فترة Cooldown للـ AI"""
+    """Ensure no other thread is processing this alert and AI is not in cooldown."""
     now = time.time()
     with _state_lock:
         if dedup_key in _inflight_alerts:
@@ -348,7 +348,7 @@ def release_ai_slot(dedup_key):
 
 
 def reserve_action(key):
-    """Cooldown لكل deployment + سقف عام للـ actions في الساعة"""
+    """Deployment cooldown + global hourly action cap."""
     now = time.time()
     with _state_lock:
         elapsed = now - _last_action.get(key, 0)
@@ -413,7 +413,7 @@ def execute_with_policy(d: Diagnosis, namespace):
             return "blocked", f"Container '{container}' has no readable memory limit; refusing to guess."
         if current_mi >= MAX_MEMORY_MI:
             return "blocked", f"Memory limit already at/above cap ({current_mi:.0f}Mi >= {MAX_MEMORY_MI}Mi)."
-        # ضمان قفزة كافية (على الأقل +32Mi أو الضعف) لتفادي OOMKilled المتكرر في القيم الصغيرة
+        # Ensure sufficient jump (at least +32Mi or double) to avoid repeated OOMKilled
         calculated_mi = max(math.ceil(current_mi * MEM_INCREASE_FACTOR), current_mi + MIN_MEMORY_STEP_MI, 64)
         new_mi = int(min(calculated_mi, MAX_MEMORY_MI))
         description = f"raise memory limit of '{name}/{container}' from {current_mi:.0f}Mi to {new_mi}Mi (cap {MAX_MEMORY_MI}Mi)"
@@ -469,7 +469,7 @@ def send_slack_report(alert_name, namespace, d: Diagnosis, status, detail):
 
 
 # ===========================================================================
-# 8) الـ Workflow + الـ Webhook (مع بوابة الحماية Pre-LLM Gatekeeper)
+# 8) Workflow + Webhook (with Pre-LLM Gatekeeper)
 # ===========================================================================
 def process_alert(alert_name, namespace, alert_labels, dedup_key):
     try:
@@ -504,17 +504,17 @@ def receive_alert():
         alert_name = labels.get('alertname', 'unknown')
         namespace = labels.get('namespace', 'default')
 
-        # 1. تجاهل التنبيهات الإدارية والـ Heartbeat فوراً
+        # 1. Ignore administrative and heartbeat alerts immediately
         if alert_name in IGNORED_ALERTS:
             logging.info(f"⏭️ Ignoring noisy/system alert: {alert_name}")
             continue
 
-        # 2. تجاهل الـ Namespaces غير المسموح بها قبل استهلاك أي Tokens
+        # 2. Ignore unauthorized namespaces before consuming tokens
         if namespace not in ALLOWED_NAMESPACES:
             logging.info(f"⏭️ Skipping alert '{alert_name}' in non-allowed namespace '{namespace}'")
             continue
 
-        # 3. منع التكرار والـ Race Condition قبل إرسال المهمة للـ ThreadPool
+        # 3. Prevent duplication and race conditions before queuing
         dedup_key = f"{namespace}/{alert_name}"
         ok, reason = acquire_ai_slot(dedup_key)
         if not ok:
@@ -530,6 +530,3 @@ def receive_alert():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
-
-    

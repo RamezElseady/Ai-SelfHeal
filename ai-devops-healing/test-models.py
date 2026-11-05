@@ -1,4 +1,3 @@
-"""يختبر كل موديل نصي متاح على الـ API key ويطبع الشغال منهم وسرعته."""
 import time
 from google import genai
 from google.genai import types, errors

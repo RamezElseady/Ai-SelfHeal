@@ -17,10 +17,9 @@ spec:
       containers:
       - name: stress-app
         image: alpine
-        # الأمر ده بيعمل ضغط متواصل 100% على الـ CPU المتاح ليه
         command: ["/bin/sh", "-c", "md5sum /dev/zero"]
         resources:
           requests:
             cpu: "50m"
           limits:
-            cpu: "100m" # أول ما البود يوصل للرقم ده بروميثيوس هيضرب تنبيه
+            cpu: "100m" 
